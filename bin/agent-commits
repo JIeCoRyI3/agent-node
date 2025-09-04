@@ -1,8 +1,18 @@
 #!/usr/bin/env node
-try {
-  require('../dist/cli.cjs');
-} catch (err) {
-  console.error('[agent-commits] Failed to start CLI.', err && err.message ? err.message : err);
-  process.exit(1);
-}
+// Support both ESM and CJS builds
+(async () => {
+  try {
+    // Prefer ESM build when available
+    await import('../dist/cli.js');
+  } catch (err) {
+    try {
+      // Fallback to CommonJS build
+      require('../dist/cli.cjs');
+    } catch (err2) {
+      const msg = (err2 && err2.message) || (err && err.message) || String(err2 || err);
+      console.error('[agent-commits] Failed to start CLI.', msg);
+      process.exit(1);
+    }
+  }
+})();
 

@@ -470,7 +470,7 @@ async function runConfig(options) {
 
 // src/cli.ts
 var program = new import_commander.Command();
-program.name("agent-commits").description("Reassign AI agent commits to current user with templates").version("0.1.0");
+program.name("agent-commits").description("Reassign AI agent commits to current user with templates").version("0.1.1");
 program.command("login").description("Perform Google SSO and store session locally").action(async () => {
   try {
     await runLogin();

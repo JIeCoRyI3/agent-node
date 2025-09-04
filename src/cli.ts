@@ -11,7 +11,7 @@ const program = new Command();
 program
   .name('agent-commits')
   .description('Reassign AI agent commits to current user with templates')
-  .version('0.1.0');
+  .version('0.1.1');
 
 program
   .command('login')
