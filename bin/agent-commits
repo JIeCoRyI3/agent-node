@@ -1,0 +1,8 @@
+#!/usr/bin/env node
+try {
+  require('../dist/cli.cjs');
+} catch (err) {
+  console.error('[agent-commits] Failed to start CLI.', err && err.message ? err.message : err);
+  process.exit(1);
+}
+
