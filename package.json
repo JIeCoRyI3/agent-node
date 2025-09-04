@@ -1,0 +1,53 @@
+{
+  "name": "agent-commits",
+  "version": "0.1.0",
+  "description": "CLI to reassign AI agent commits to the current user and format them.",
+  "license": "MIT",
+  "author": "Internal Devs",
+  "type": "module",
+  "bin": {
+    "agent-commits": "./bin/agent-commits"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./cli": {
+      "import": "./dist/cli.js",
+      "require": "./dist/cli.cjs"
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup",
+    "clean": "rimraf dist",
+    "prepublishOnly": "npm run build",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "git",
+    "github",
+    "cli",
+    "oauth2",
+    "google",
+    "commits"
+  ],
+  "devDependencies": {
+    "tsup": "^8.2.4",
+    "typescript": "^5.5.4",
+    "rimraf": "^6.0.1"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  }
+}
+
