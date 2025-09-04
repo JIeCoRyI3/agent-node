@@ -18,10 +18,11 @@ var GOOGLE_USERINFO = "https://www.googleapis.com/oauth2/v3/userinfo";
 var OAUTH_SCOPE = "openid email profile";
 function getClientConfig() {
   const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
   if (!clientId) {
     throw new CliError("Google OAuth client id is required in env GOOGLE_OAUTH_CLIENT_ID", 17 /* GoogleSsoFailed */);
   }
-  return { clientId };
+  return { clientId, clientSecret };
 }
 async function postForm(url, params) {
   const body = new URLSearchParams(params).toString();
@@ -31,9 +32,26 @@ async function postForm(url, params) {
     body
   });
   if (!res.ok) {
-    const text = await res.text();
+    let errBody = void 0;
+    try {
+      errBody = await res.json();
+    } catch {
+    }
+    const errCode = errBody?.error;
+    if (errCode === "authorization_pending" || errCode === "slow_down") {
+      const error = new Error(errCode);
+      error.oauthError = errCode;
+      throw error;
+    }
+    if (errCode === "invalid_request" && /client_secret/i.test(errBody?.error_description || "")) {
+      throw new CliError(
+        "Google OAuth client secret required. Set GOOGLE_OAUTH_CLIENT_SECRET for confidential clients.",
+        17 /* GoogleSsoFailed */
+      );
+    }
+    const text = errBody ? JSON.stringify(errBody) : await res.text();
     logger.error(`HTTP ${res.status} ${res.statusText}`);
-    throw new CliError(`Request failed: ${res.status}`, 19 /* NetworkError */);
+    throw new CliError(`Request failed: ${res.status} ${text}`, 19 /* NetworkError */);
   }
   return res.json();
 }
@@ -56,7 +74,7 @@ async function deviceLogin(nonInteractive = true) {
   const verificationUrl = init.verification_url || init.verification_uri;
   const userCode = init.user_code;
   const deviceCode = init.device_code;
-  const interval = (init.interval || 5) * 1e3;
+  let pollInterval = (init.interval || 5) * 1e3;
   const expiresIn = init.expires_in * 1e3;
   logger.info(`Open URL to authorize: ${verificationUrl}`);
   logger.info(`User code: ${userCode}`);
@@ -67,32 +85,71 @@ async function deviceLogin(nonInteractive = true) {
   }
   const startTime = Date.now();
   while (Date.now() - startTime < expiresIn) {
-    await new Promise((r) => setTimeout(r, interval));
+    await new Promise((r) => setTimeout(r, pollInterval));
     try {
-      const token = await postForm(GOOGLE_TOKEN_URL, {
+      const { clientSecret } = getClientConfig();
+      const body = new URLSearchParams({
         client_id: clientId,
         device_code: deviceCode,
-        grant_type: "urn:ietf:params:oauth:grant-type:device_code"
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        ...clientSecret ? { client_secret: clientSecret } : {}
+      }).toString();
+      const res = await fetch(GOOGLE_TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body
       });
-      if (token.access_token) {
-        const profileRes = await fetch(GOOGLE_USERINFO, {
-          headers: { Authorization: `Bearer ${token.access_token}` }
-        });
-        const profile = await profileRes.json();
-        const state = getState();
-        state.google = {
-          accessToken: token.access_token,
-          refreshToken: token.refresh_token,
-          expiresAt: Date.now() + token.expires_in * 1e3,
-          email: profile.email,
-          sub: profile.sub
-        };
-        setState(state);
-        logger.info("Google SSO success");
-        return;
+      if (res.ok) {
+        const token = await res.json();
+        if (token.access_token) {
+          const profileRes = await fetch(GOOGLE_USERINFO, {
+            headers: { Authorization: `Bearer ${token.access_token}` }
+          });
+          const profile = await profileRes.json();
+          const state = getState();
+          state.google = {
+            accessToken: token.access_token,
+            refreshToken: token.refresh_token,
+            expiresAt: Date.now() + token.expires_in * 1e3,
+            email: profile.email,
+            sub: profile.sub
+          };
+          setState(state);
+          logger.info("Google SSO success");
+          return;
+        }
+      } else {
+        let errBody = void 0;
+        try {
+          errBody = await res.json();
+        } catch {
+        }
+        const errCode = errBody?.error;
+        if (errCode === "authorization_pending") {
+          continue;
+        }
+        if (errCode === "slow_down") {
+          pollInterval += 5e3;
+          continue;
+        }
+        if (errCode === "access_denied") {
+          throw new CliError("Google SSO was denied by user", 17 /* GoogleSsoFailed */);
+        }
+        if (errCode === "expired_token" || errCode === "invalid_grant") {
+          throw new CliError("Google SSO device code expired or invalid", 17 /* GoogleSsoFailed */);
+        }
+        if (errCode === "invalid_request" && /client_secret/i.test(errBody?.error_description || "")) {
+          throw new CliError(
+            "Google OAuth client secret required. Set GOOGLE_OAUTH_CLIENT_SECRET for confidential clients.",
+            17 /* GoogleSsoFailed */
+          );
+        }
+        const text = errBody ? JSON.stringify(errBody) : await res.text();
+        logger.error(`HTTP ${res.status} ${res.statusText}`);
+        throw new CliError(`Request failed: ${res.status} ${text}`, 19 /* NetworkError */);
       }
     } catch (e) {
-      if (e?.code === 19 /* NetworkError */) throw e;
+      if (e?.code === 19 /* NetworkError */ || e?.code === 17 /* GoogleSsoFailed */) throw e;
     }
   }
   throw new CliError("Google SSO timed out", 17 /* GoogleSsoFailed */);
