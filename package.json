@@ -1,6 +1,6 @@
 {
   "name": "agent-commits",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CLI to reassign AI agent commits to the current user and format them.",
   "license": "MIT",
   "author": "Internal Devs",
