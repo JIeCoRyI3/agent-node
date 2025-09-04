@@ -18,14 +18,16 @@ const OAUTH_SCOPE = 'openid email profile';
 
 export interface GoogleClientConfig {
   clientId: string; // Provided by user via env or config
+  clientSecret?: string; // Optional, required for confidential clients
 }
 
 function getClientConfig(): GoogleClientConfig {
   const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
   if (!clientId) {
     throw new CliError('Google OAuth client id is required in env GOOGLE_OAUTH_CLIENT_ID', ExitCode.GoogleSsoFailed);
   }
-  return { clientId };
+  return { clientId, clientSecret };
 }
 
 async function postForm(url: string, params: Record<string, string>): Promise<any> {
@@ -36,9 +38,26 @@ async function postForm(url: string, params: Record<string, string>): Promise<an
     body,
   });
   if (!res.ok) {
-    const text = await res.text();
+    let errBody: any = undefined;
+    try {
+      errBody = await res.json();
+    } catch {}
+    const errCode = errBody?.error;
+    // For device endpoints we may get 400s for pending/slowdown. Let caller decide.
+    if (errCode === 'authorization_pending' || errCode === 'slow_down') {
+      const error = new Error(errCode) as any;
+      (error as any).oauthError = errCode;
+      throw error;
+    }
+    if (errCode === 'invalid_request' && /client_secret/i.test(errBody?.error_description || '')) {
+      throw new CliError(
+        'Google OAuth client secret required. Set GOOGLE_OAUTH_CLIENT_SECRET for confidential clients.',
+        ExitCode.GoogleSsoFailed,
+      );
+    }
+    const text = errBody ? JSON.stringify(errBody) : await res.text();
     logger.error(`HTTP ${res.status} ${res.statusText}`);
-    throw new CliError(`Request failed: ${res.status}`, ExitCode.NetworkError);
+    throw new CliError(`Request failed: ${res.status} ${text}`, ExitCode.NetworkError);
   }
   return res.json();
 }
@@ -65,7 +84,7 @@ export async function deviceLogin(nonInteractive = true): Promise<void> {
   const verificationUrl = init.verification_url || init.verification_uri;
   const userCode = init.user_code;
   const deviceCode = init.device_code;
-  const interval = (init.interval || 5) * 1000;
+  let pollInterval = (init.interval || 5) * 1000;
   const expiresIn = init.expires_in * 1000;
 
   logger.info(`Open URL to authorize: ${verificationUrl}`);
@@ -79,33 +98,75 @@ export async function deviceLogin(nonInteractive = true): Promise<void> {
 
   const startTime = Date.now();
   while (Date.now() - startTime < expiresIn) {
-    await new Promise((r) => setTimeout(r, interval));
+    await new Promise((r) => setTimeout(r, pollInterval));
     try {
-      const token = await postForm(GOOGLE_TOKEN_URL, {
+      const { clientSecret } = getClientConfig();
+      const body = new URLSearchParams({
         client_id: clientId,
         device_code: deviceCode,
         grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+        ...(clientSecret ? { client_secret: clientSecret } : {}),
+      }).toString();
+      const res = await fetch(GOOGLE_TOKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
       });
-      if (token.access_token) {
-        const profileRes = await fetch(GOOGLE_USERINFO, {
-          headers: { Authorization: `Bearer ${token.access_token}` },
-        });
-        const profile = await profileRes.json();
-        const state = getState();
-        state.google = {
-          accessToken: token.access_token,
-          refreshToken: token.refresh_token,
-          expiresAt: Date.now() + token.expires_in * 1000,
-          email: profile.email,
-          sub: profile.sub,
-        };
-        setState(state);
-        logger.info('Google SSO success');
-        return;
+
+      if (res.ok) {
+        const token = await res.json();
+        if (token.access_token) {
+          const profileRes = await fetch(GOOGLE_USERINFO, {
+            headers: { Authorization: `Bearer ${token.access_token}` },
+          });
+          const profile = await profileRes.json();
+          const state = getState();
+          state.google = {
+            accessToken: token.access_token,
+            refreshToken: token.refresh_token,
+            expiresAt: Date.now() + token.expires_in * 1000,
+            email: profile.email,
+            sub: profile.sub,
+          };
+          setState(state);
+          logger.info('Google SSO success');
+          return;
+        }
+      } else {
+        let errBody: any = undefined;
+        try {
+          errBody = await res.json();
+        } catch {}
+        const errCode = errBody?.error;
+        if (errCode === 'authorization_pending') {
+          // Continue polling
+          continue;
+        }
+        if (errCode === 'slow_down') {
+          // Increase polling interval by 5 seconds as per spec
+          pollInterval += 5_000;
+          continue;
+        }
+        if (errCode === 'access_denied') {
+          throw new CliError('Google SSO was denied by user', ExitCode.GoogleSsoFailed);
+        }
+        if (errCode === 'expired_token' || errCode === 'invalid_grant') {
+          throw new CliError('Google SSO device code expired or invalid', ExitCode.GoogleSsoFailed);
+        }
+        if (errCode === 'invalid_request' && /client_secret/i.test(errBody?.error_description || '')) {
+          throw new CliError(
+            'Google OAuth client secret required. Set GOOGLE_OAUTH_CLIENT_SECRET for confidential clients.',
+            ExitCode.GoogleSsoFailed,
+          );
+        }
+
+        const text = errBody ? JSON.stringify(errBody) : await res.text();
+        logger.error(`HTTP ${res.status} ${res.statusText}`);
+        throw new CliError(`Request failed: ${res.status} ${text}`, ExitCode.NetworkError);
       }
     } catch (e: any) {
-      // authorization_pending / slow_down -> continue
-      if (e?.code === ExitCode.NetworkError) throw e;
+      // Network errors should bubble up; others are handled above
+      if (e?.code === ExitCode.NetworkError || e?.code === ExitCode.GoogleSsoFailed) throw e;
     }
   }
   throw new CliError('Google SSO timed out', ExitCode.GoogleSsoFailed);
